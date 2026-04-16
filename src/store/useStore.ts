@@ -53,15 +53,30 @@ export const useStore = create<AppState>((set, get) => ({
     accounts: state.accounts.filter(a => a.id !== id)
   })),
 
-  refreshAccount: (id) => {
+  refreshAccount: async (id) => {
     set((state) => ({
       accounts: state.accounts.map(a => a.id === id ? { ...a, status: 'checking' } : a)
     }));
-    setTimeout(() => {
+    
+    try {
+      const account = get().accounts.find(a => a.id === id);
+      if (!account) return;
+
+      const response = await fetch('/api/auth/verify-cookie', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie: account.cookie })
+      });
+      const data = await response.json();
+
       set((state) => ({
-        accounts: state.accounts.map(a => a.id === id ? { ...a, status: 'valid' } : a)
+        accounts: state.accounts.map(a => a.id === id ? { ...a, status: data.valid ? 'valid' : 'expired' } : a)
       }));
-    }, 1500);
+    } catch (e) {
+      set((state) => ({
+        accounts: state.accounts.map(a => a.id === id ? { ...a, status: 'expired' } : a)
+      }));
+    }
   },
 
   addTask: (task) => {
@@ -127,30 +142,47 @@ export const useStore = create<AppState>((set, get) => ({
     // Start task
     get().updateTask(nextTask.id, { status: 'generating', accountId: account.id, progress: 10 });
 
-    // Mock generation process
-    let progress = 10;
-    const interval = setInterval(() => {
-      progress += Math.floor(Math.random() * 20);
-      if (progress >= 90) {
-        clearInterval(interval);
-        get().updateTask(nextTask.id, { status: 'uploading', progress: 95 });
+    // Handle HTTP request asynchronously without blocking the queue check
+    (async () => {
+      try {
+        // Start simulated progress bar for UI feel
+        let progress = 10;
+        const progressInterval = setInterval(() => {
+           progress = Math.min(progress + Math.floor(Math.random() * 15), 90);
+           get().updateTask(nextTask.id, { progress });
+        }, 800);
+
+        // Call the backend proxy
+        const response = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: nextTask.type,
+            prompt: nextTask.prompt,
+            referenceImage: nextTask.referenceImage,
+            cookie: account.cookie
+          })
+        });
+
+        clearInterval(progressInterval);
+        const data = await response.json();
         
-        setTimeout(() => {
-          // If it's a chain task > 0, we simulate using the previous image
-          // For mock, just generate a random image
-          const seed = Math.floor(Math.random() * 1000);
-          const resultUrl = nextTask.type === 'image' 
-            ? `https://picsum.photos/seed/${seed}/400/225`
-            : `https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/360/Big_Buck_Bunny_360_10s_1MB.mp4`; // Mock video
-            
-          get().updateTask(nextTask.id, { status: 'completed', progress: 100, resultUrl });
-          
-          // Trigger next in queue
-          get().processQueue();
-        }, 1500);
-      } else {
-        get().updateTask(nextTask.id, { progress });
+        if (data.success) {
+           get().updateTask(nextTask.id, { status: 'uploading', progress: 95 });
+           // Local simulate download step
+           setTimeout(() => {
+             get().updateTask(nextTask.id, { status: 'completed', progress: 100, resultUrl: data.url });
+             get().processQueue(); // trigger next
+           }, 500);
+        } else {
+           get().updateTask(nextTask.id, { status: 'error', progress: 0 });
+           get().processQueue();
+        }
+
+      } catch (err) {
+        get().updateTask(nextTask.id, { status: 'error', progress: 0 });
+        get().processQueue();
       }
-    }, 800);
+    })();
   }
 }));
